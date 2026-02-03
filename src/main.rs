@@ -1,12 +1,16 @@
 mod app;
+mod disk;
 mod event;
+mod history;
+mod network;
+mod process;
+mod system;
 mod tui;
 mod ui;
 
 use anyhow::Result;
 use app::App;
 use event::{Event, EventHandler};
-use ratatui::{backend::CrosstermBackend, Terminal};
 use tui::Tui;
 
 fn main() -> Result<()> {
@@ -39,7 +43,7 @@ fn run_app(terminal: &mut Tui, app: &mut App, events: &EventHandler) -> Result<(
         match events.next()? {
             Event::Tick => app.on_tick(),
             Event::Key(key) => app.on_key(key),
-            Event::Resize(_, _) => {}, // Ratatui handles resize automatically during draw
+            Event::Resize(w, h) => app.on_resize(w, h),
         }
     }
     Ok(())

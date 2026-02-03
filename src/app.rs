@@ -1,188 +1,190 @@
-use std::collections::VecDeque;
-
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::TableState;
-use sysinfo::{Networks, System};
 
-/// Application state.
-#[derive(Debug)]
+use crate::history::{HistoryBuffer, SessionLogger};
+use crate::network::NetworkMonitor;
+use crate::process::ProcessManager;
+use crate::system::SystemMonitor;
+use crate::disk::DiskMonitor;
+
+#[derive(Debug, PartialEq)]
+pub enum ActivePanel {
+    Charts,
+    Logs,
+    History,
+}
+
 pub struct App {
-    /// Is the application running?
     pub running: bool,
-    /// System object to gather stats.
-    pub system: System,
-    /// Networks object to gather stats.
-    pub networks: Networks,
-    /// History of CPU usage (global).
-    pub cpu_history: VecDeque<f64>,
-    /// History of Memory usage.
-    pub mem_history: VecDeque<f64>,
-    /// History of Swap usage.
-    pub swap_history: VecDeque<f64>,
-    /// History of Network IO (RX, TX).
-    pub net_history: VecDeque<(u64, u64)>,
-    /// State for the process table.
+    pub active_panel: ActivePanel,
+    pub terminal_size: (u16, u16),
+    
+    // Modules
+    pub system: SystemMonitor,
+    pub network: NetworkMonitor,
+    pub disk: DiskMonitor,
+    pub process: ProcessManager,
+    pub logger: SessionLogger,
+    
+    // UI State
     pub process_table_state: TableState,
-    /// Current sort mode for processes.
-    pub sort_mode: SortMode,
-    /// Sliding window size for graphs.
-    pub window_size: usize,
-    /// Cache for sorted processes to avoid sorting every render frame if not needed.
-    pub processes: Vec<ProcessInfo>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum SortMode {
-    Cpu,
-    Memory,
-    Pid,
-}
-
-#[derive(Debug, Clone)]
-pub struct ProcessInfo {
-    pub pid: u32,
-    pub name: String,
-    pub cpu: f32,
-    pub memory: u64,
+    
+    // History Data
+    pub cpu_history: HistoryBuffer<f64>,
+    pub mem_history: HistoryBuffer<f64>,
+    pub net_rx_history: HistoryBuffer<u64>,
+    pub net_tx_history: HistoryBuffer<u64>,
+    
+    // Core history: Map of Core Index -> History
+    pub core_history: Vec<HistoryBuffer<f32>>,
+    
+    // Alerts/Logs
+    pub logs: Vec<String>,
 }
 
 impl App {
-    /// Constructs a new instance of [`App`].
     pub fn new() -> Self {
-        let mut system = System::new_all();
-        system.refresh_all();
-        let networks = Networks::new_with_refreshed_list();
+        let system = SystemMonitor::new();
+        let core_count = system.inner().cpus().len();
+        
+        let mut core_history = Vec::with_capacity(core_count);
+        for _ in 0..core_count {
+            core_history.push(HistoryBuffer::new(100));
+        }
 
         Self {
             running: true,
+            active_panel: ActivePanel::Charts,
+            terminal_size: (0, 0),
             system,
-            networks,
-            cpu_history: VecDeque::from(vec![0.0; 100]),
-            mem_history: VecDeque::from(vec![0.0; 100]),
-            swap_history: VecDeque::from(vec![0.0; 100]),
-            net_history: VecDeque::from(vec![(0, 0); 100]),
+            network: NetworkMonitor::new(),
+            disk: DiskMonitor::new(),
+            process: ProcessManager::new(),
+            logger: SessionLogger::new("sysmon_session.log"),
             process_table_state: TableState::default(),
-            sort_mode: SortMode::Cpu,
-            window_size: 100,
-            processes: Vec::new(),
+            cpu_history: HistoryBuffer::new(100),
+            mem_history: HistoryBuffer::new(100),
+            net_rx_history: HistoryBuffer::new(100),
+            net_tx_history: HistoryBuffer::new(100),
+            core_history,
+            logs: Vec::new(),
         }
     }
 
-    /// Handles the tick event (updates system stats).
     pub fn on_tick(&mut self) {
-        // Refresh system stats
-        self.system.refresh_cpu();
-        self.system.refresh_memory();
-        self.networks.refresh();
-        self.system.refresh_processes();
+        // Refresh Data
+        self.system.refresh();
+        let net_stats = self.network.refresh();
+        self.disk.refresh();
 
-        // Update CPU History
-        let cpu_usage = self.system.global_cpu_info().cpu_usage() as f64;
-        Self::push_history(&mut self.cpu_history, cpu_usage, self.window_size);
-
-        // Update Memory History
-        let total_mem = self.system.total_memory() as f64;
-        let used_mem = self.system.used_memory() as f64;
-        let mem_usage = if total_mem > 0.0 { (used_mem / total_mem) * 100.0 } else { 0.0 };
-        Self::push_history(&mut self.mem_history, mem_usage, self.window_size);
-
-        // Update Swap History
-        let total_swap = self.system.total_swap() as f64;
-        let used_swap = self.system.used_swap() as f64;
-        let swap_usage = if total_swap > 0.0 { (used_swap / total_swap) * 100.0 } else { 0.0 };
-        Self::push_history(&mut self.swap_history, swap_usage, self.window_size);
-
-        // Update Network History
-        let mut total_rx = 0;
-        let mut total_tx = 0;
-        for (_name, data) in &self.networks {
-            total_rx += data.received();
-            total_tx += data.transmitted();
-        }
-        if self.net_history.len() >= self.window_size {
-            self.net_history.pop_front();
-        }
-        self.net_history.push_back((total_rx, total_tx));
-
-        // Update Process List
-        self.update_process_list();
-    }
-
-    fn push_history(history: &mut VecDeque<f64>, value: f64, window_size: usize) {
-        if history.len() >= window_size {
-            history.pop_front();
-        }
-        history.push_back(value);
-    }
-
-    fn update_process_list(&mut self) {
-        let mut procs: Vec<ProcessInfo> = self.system.processes().iter().map(|(pid, proc)| {
-            ProcessInfo {
-                pid: pid.as_u32(),
-                name: proc.name().to_string(),
-                cpu: proc.cpu_usage(),
-                memory: proc.memory(),
+        // Update History
+        let cpu = self.system.global_cpu();
+        self.cpu_history.push(cpu as f64);
+        
+        let (used_mem, total_mem) = self.system.memory_usage();
+        let mem_pct = if total_mem > 0 { (used_mem as f64 / total_mem as f64) * 100.0 } else { 0.0 };
+        self.mem_history.push(mem_pct);
+        
+        // Cores
+        let cores = self.system.cores_cpu();
+        for (i, usage) in cores.iter().enumerate() {
+            if let Some(hist) = self.core_history.get_mut(i) {
+                hist.push(*usage);
             }
-        }).collect();
-
-        match self.sort_mode {
-            SortMode::Cpu => procs.sort_by(|a, b| b.cpu.partial_cmp(&a.cpu).unwrap_or(std::cmp::Ordering::Equal)),
-            SortMode::Memory => procs.sort_by(|a, b| b.memory.cmp(&a.memory)),
-            SortMode::Pid => procs.sort_by(|a, b| a.pid.cmp(&b.pid)),
         }
 
-        self.processes = procs;
+        // Network
+        self.net_rx_history.push(net_stats.rx_speed);
+        self.net_tx_history.push(net_stats.tx_speed);
+        
+        // Anomaly Detection
+        if cpu > 90.0 {
+            self.add_log(format!("CRITICAL: High CPU Usage: {:.1}%", cpu));
+        }
+        if mem_pct > 90.0 {
+            self.add_log(format!("CRITICAL: High Memory Usage: {:.1}%", mem_pct));
+        }
+    }
+    
+    pub fn on_resize(&mut self, w: u16, h: u16) {
+        self.terminal_size = (w, h);
+    }
+    
+    pub fn add_log(&mut self, msg: String) {
+        // Avoid spamming logs
+        if self.logs.last() != Some(&msg) {
+            self.logger.log(&msg);
+            if self.logs.len() > 50 {
+                self.logs.remove(0);
+            }
+            self.logs.push(msg);
+        }
     }
 
-    /// Handles key events.
     pub fn on_key(&mut self, key: KeyEvent) {
-        match (key.code, key.modifiers) {
-            (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                self.running = false;
-            }
-            (KeyCode::Char('s'), _) => {
-                self.sort_mode = match self.sort_mode {
-                    SortMode::Cpu => SortMode::Memory,
-                    SortMode::Memory => SortMode::Pid,
-                    SortMode::Pid => SortMode::Cpu,
-                };
-                self.update_process_list();
-            }
-            (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
-                self.next_row();
-            }
-            (KeyCode::Up, _) | (KeyCode::Char('k'), _) => {
-                self.previous_row();
-            }
+        match key.code {
+            KeyCode::Char('q') => self.running = false,
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => self.running = false,
+            KeyCode::Char('l') | KeyCode::Char('L') => {
+                 self.active_panel = match self.active_panel {
+                     ActivePanel::Logs => ActivePanel::Charts,
+                     _ => ActivePanel::Logs,
+                 };
+            },
+            KeyCode::Char('h') | KeyCode::Char('H') => {
+                 self.active_panel = match self.active_panel {
+                     ActivePanel::History => ActivePanel::Charts,
+                     _ => ActivePanel::History,
+                 };
+            },
+            KeyCode::Char('k') | KeyCode::Char('K') => {
+                if self.process.kill_process(self.system.inner()) {
+                    self.add_log(format!("Killed process PID {:?}", self.process.selected_pid));
+                } else {
+                    self.add_log("Failed to kill process".to_string());
+                }
+            },
+            KeyCode::Char('s') | KeyCode::Char('S') => {
+                self.process.toggle_sort();
+            },
+            KeyCode::Down => self.next_process(),
+            KeyCode::Up => self.previous_process(),
             _ => {}
         }
     }
-
-    fn next_row(&mut self) {
+    
+    fn next_process(&mut self) {
+        let procs_len = self.system.inner().processes().len();
+        if procs_len == 0 { return; }
+        
         let i = match self.process_table_state.selected() {
             Some(i) => {
-                if i >= self.processes.len().saturating_sub(1) {
-                    0
-                } else {
-                    i + 1
-                }
+                if i >= procs_len - 1 { 0 } else { i + 1 }
             }
             None => 0,
         };
         self.process_table_state.select(Some(i));
+        self.update_selected_pid(i);
     }
 
-    fn previous_row(&mut self) {
+    fn previous_process(&mut self) {
+        let procs_len = self.system.inner().processes().len();
+        if procs_len == 0 { return; }
+
         let i = match self.process_table_state.selected() {
             Some(i) => {
-                if i == 0 {
-                    self.processes.len().saturating_sub(1)
-                } else {
-                    i - 1
-                }
+                if i == 0 { procs_len - 1 } else { i - 1 }
             }
             None => 0,
         };
         self.process_table_state.select(Some(i));
+        self.update_selected_pid(i);
+    }
+    
+    fn update_selected_pid(&mut self, index: usize) {
+        let sorted = self.process.get_sorted_processes(self.system.inner());
+        if let Some(p) = sorted.get(index) {
+            self.process.selected_pid = Some(p.pid);
+        }
     }
 }
