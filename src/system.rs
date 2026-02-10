@@ -1,20 +1,23 @@
-use sysinfo::System;
+use sysinfo::{System, Components};
 
 pub struct SystemMonitor {
     sys: System,
+    components: Components,
 }
 
 impl SystemMonitor {
     pub fn new() -> Self {
         let mut sys = System::new_all();
         sys.refresh_all();
-        Self { sys }
+        let components = Components::new_with_refreshed_list();
+        Self { sys, components }
     }
 
     pub fn refresh(&mut self) {
         self.sys.refresh_cpu();
         self.sys.refresh_memory();
         self.sys.refresh_processes();
+        self.components.refresh();
     }
     
     pub fn global_cpu(&self) -> f32 {
@@ -23,6 +26,12 @@ impl SystemMonitor {
     
     pub fn cores_cpu(&self) -> Vec<f32> {
         self.sys.cpus().iter().map(|cpu| cpu.cpu_usage()).collect()
+    }
+
+    pub fn components(&self) -> Vec<(String, f32)> {
+        self.components.iter().map(|c| {
+            (c.label().to_string(), c.temperature())
+        }).collect()
     }
 
     pub fn memory_usage(&self) -> (u64, u64) {

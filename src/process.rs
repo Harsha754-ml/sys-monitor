@@ -21,6 +21,7 @@ pub struct ProcessInfo {
 pub struct ProcessManager {
     pub sort_mode: SortBy,
     pub selected_pid: Option<Pid>,
+    pub filter: String,
 }
 
 impl ProcessManager {
@@ -28,11 +29,26 @@ impl ProcessManager {
         Self {
             sort_mode: SortBy::Cpu,
             selected_pid: None,
+            filter: String::new(),
         }
     }
 
+    pub fn set_filter(&mut self, query: String) {
+        self.filter = query;
+    }
+
     pub fn get_sorted_processes(&self, system: &System) -> Vec<ProcessInfo> {
-        let mut procs: Vec<ProcessInfo> = system.processes().iter().map(|(pid, proc)| {
+        let filter_lower = self.filter.to_lowercase();
+        
+        let mut procs: Vec<ProcessInfo> = system.processes().iter()
+            .filter(|(_, proc)| {
+                if self.filter.is_empty() {
+                    true
+                } else {
+                    proc.name().to_lowercase().contains(&filter_lower)
+                }
+            })
+            .map(|(pid, proc)| {
             ProcessInfo {
                 pid: *pid,
                 name: proc.name().to_string(),

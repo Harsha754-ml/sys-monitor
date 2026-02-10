@@ -7,6 +7,7 @@ mod process;
 mod system;
 mod tui;
 mod ui;
+mod export;
 
 use anyhow::Result;
 use app::App;

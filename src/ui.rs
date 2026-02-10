@@ -8,7 +8,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, ActivePanel};
+use crate::app::{App, ActivePanel, InputMode};
 use crate::process::SortBy;
 use crate::system::SystemMonitor;
 
@@ -36,10 +36,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     let title = " SYSMON ULTIMATE v2.0 ";
-    let help = " Q:Quit | S:Sort | K:Kill | L:Logs | H:History ";
+    let help = " Q:Quit | S:Sort | /:Search | K:Kill | E:Export | L:Logs | H:History ";
     
-    let sys_name = SystemMonitor::name();
-    let host = SystemMonitor::host_name();
+    let sys_name = SystemMonitor::name();    let host = SystemMonitor::host_name();
     let os_ver = SystemMonitor::os_version();
     let uptime = SystemMonitor::uptime();
     
@@ -86,7 +85,7 @@ fn draw_dashboard(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_cpu_panel(f: &mut Frame, app: &App, area: Rect) {
-    let block = Block::default().title(" CPU Usage ").borders(Borders::ALL);
+    let block = Block::default().title(" CPU & Sensors ").borders(Borders::ALL);
     let inner_area = block.inner(area);
     f.render_widget(block, area);
     
@@ -103,6 +102,11 @@ fn draw_cpu_panel(f: &mut Frame, app: &App, area: Rect) {
         .label(format!("{:.1}%", cpu_val));
     f.render_widget(gauge, chunks[0]);
     
+    let bottom_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(chunks[1]);
+
     // Core Sparklines
     let cores: Vec<u64> = app.core_history.iter()
         .map(|h| h.latest().copied().unwrap_or(0.0) as u64)
@@ -113,8 +117,18 @@ fn draw_cpu_panel(f: &mut Frame, app: &App, area: Rect) {
             .block(Block::default().title("Cores"))
             .style(Style::default().fg(Color::Green))
             .data(&cores);
-        f.render_widget(sparkline, chunks[1]);
+        f.render_widget(sparkline, bottom_chunks[0]);
     }
+    
+    // Sensors
+    let sensors = app.system.components();
+    let sensor_items: Vec<ListItem> = sensors.iter().take(8).map(|(label, temp)| {
+        let color = if *temp > 80.0 { Color::Red } else if *temp > 60.0 { Color::Yellow } else { Color::Green };
+        ListItem::new(format!("{}: {:.1}°C", label, temp)).style(Style::default().fg(color))
+    }).collect();
+    
+    let sensors_list = List::new(sensor_items).block(Block::default().title("Sensors").borders(Borders::LEFT));
+    f.render_widget(sensors_list, bottom_chunks[1]);
 }
 
 fn draw_mem_panel(f: &mut Frame, app: &App, area: Rect) {
@@ -228,7 +242,25 @@ fn draw_process_table(f: &mut Frame, app: &mut App, area: Rect) {
         SortBy::Memory => "Memory",
     };
 
-    let title = format!(" Processes | Sort: {} | Total: {} ", sort_str, procs.len());
+    let filter_str = if app.process.filter.is_empty() {
+        "None".to_string()
+    } else {
+        app.process.filter.clone()
+    };
+    
+    let filter_style = if app.input_mode == InputMode::Editing {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+
+    let title = Line::from(vec![
+        Span::raw(" Processes | Sort: "),
+        Span::styled(sort_str, Style::default().fg(Color::Cyan)),
+        Span::raw(" | Filter: "),
+        Span::styled(format!("[ {} ]", filter_str), filter_style),
+        Span::raw(format!(" | Total: {} ", procs.len())),
+    ]);
 
     let t = Table::new(
         rows,

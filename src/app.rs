@@ -6,6 +6,7 @@ use crate::network::NetworkMonitor;
 use crate::process::ProcessManager;
 use crate::system::SystemMonitor;
 use crate::disk::DiskMonitor;
+use crate::export::export_history;
 
 #[derive(Debug, PartialEq)]
 pub enum ActivePanel {
@@ -14,8 +15,15 @@ pub enum ActivePanel {
     History,
 }
 
+#[derive(Debug, PartialEq)]
+pub enum InputMode {
+    Normal,
+    Editing,
+}
+
 pub struct App {
     pub running: bool,
+    pub input_mode: InputMode,
     pub active_panel: ActivePanel,
     pub terminal_size: (u16, u16),
     
@@ -54,6 +62,7 @@ impl App {
 
         Self {
             running: true,
+            input_mode: InputMode::Normal,
             active_panel: ActivePanel::Charts,
             terminal_size: (0, 0),
             system,
@@ -122,34 +131,61 @@ impl App {
     }
 
     pub fn on_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Char('q') => self.running = false,
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => self.running = false,
-            KeyCode::Char('l') | KeyCode::Char('L') => {
-                 self.active_panel = match self.active_panel {
-                     ActivePanel::Logs => ActivePanel::Charts,
-                     _ => ActivePanel::Logs,
-                 };
-            },
-            KeyCode::Char('h') | KeyCode::Char('H') => {
-                 self.active_panel = match self.active_panel {
-                     ActivePanel::History => ActivePanel::Charts,
-                     _ => ActivePanel::History,
-                 };
-            },
-            KeyCode::Char('k') | KeyCode::Char('K') => {
-                if self.process.kill_process(self.system.inner()) {
-                    self.add_log(format!("Killed process PID {:?}", self.process.selected_pid));
-                } else {
-                    self.add_log("Failed to kill process".to_string());
+        match self.input_mode {
+            InputMode::Normal => match key.code {
+                KeyCode::Char('/') => {
+                    self.input_mode = InputMode::Editing;
                 }
+                KeyCode::Char('q') => self.running = false,
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => self.running = false,
+                KeyCode::Char('l') | KeyCode::Char('L') => {
+                     self.active_panel = match self.active_panel {
+                         ActivePanel::Logs => ActivePanel::Charts,
+                         _ => ActivePanel::Logs,
+                     };
+                },
+                KeyCode::Char('h') | KeyCode::Char('H') => {
+                     self.active_panel = match self.active_panel {
+                         ActivePanel::History => ActivePanel::Charts,
+                         _ => ActivePanel::History,
+                     };
+                },
+                KeyCode::Char('k') | KeyCode::Char('K') => {
+                    if self.process.kill_process(self.system.inner()) {
+                        self.add_log(format!("Killed process PID {:?}", self.process.selected_pid));
+                    } else {
+                        self.add_log("Failed to kill process".to_string());
+                    }
+                },
+                KeyCode::Char('s') | KeyCode::Char('S') => {
+                    self.process.toggle_sort();
+                },
+                KeyCode::Char('e') | KeyCode::Char('E') => {
+                    match export_history(self) {
+                        Ok(fname) => self.add_log(format!("Exported data to {}", fname)),
+                        Err(err) => self.add_log(format!("Export failed: {}", err)),
+                    }
+                },
+                KeyCode::Down => self.next_process(),
+                KeyCode::Up => self.previous_process(),
+                _ => {}
             },
-            KeyCode::Char('s') | KeyCode::Char('S') => {
-                self.process.toggle_sort();
-            },
-            KeyCode::Down => self.next_process(),
-            KeyCode::Up => self.previous_process(),
-            _ => {}
+            InputMode::Editing => match key.code {
+                KeyCode::Enter | KeyCode::Esc => {
+                    self.input_mode = InputMode::Normal;
+                }
+                KeyCode::Char(c) => {
+                    let mut current = self.process.filter.clone();
+                    current.push(c);
+                    self.process.set_filter(current);
+                }
+                KeyCode::Backspace => {
+                    let mut current = self.process.filter.clone();
+                    current.pop();
+                    self.process.set_filter(current);
+                }
+                _ => {}
+            }
         }
     }
     
